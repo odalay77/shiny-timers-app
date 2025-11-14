@@ -97,6 +97,82 @@ ui <- fluidPage(
 # ---------------------------
 # Server
 # ---------------------------
+library(shiny)
+library(DT)
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(pool)
+library(shinyjs)
+
+# ---------------------------
+# Global / setup
+# ---------------------------
+db_dir <- "/data"
+if (!dir.exists(db_dir)) dir.create(db_dir, recursive = TRUE)
+db_file <- file.path(db_dir, "timers.sqlite")
+
+pool_db <- dbPool(
+  drv    = RSQLite::SQLite(),
+  dbname = db_file
+)
+
+# Create table if missing
+dbExecute(pool_db, "
+CREATE TABLE IF NOT EXISTS timers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sample_id TEXT,
+  instrument TEXT,
+  mode TEXT,
+  step INTEGER,
+  total_secs INTEGER,
+  remaining_secs INTEGER,
+  status TEXT,
+  start_time DATETIME,
+  end_time DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+")
+
+format_hms <- function(sec) {
+  hrs <- sec %/% 3600
+  mins <- (sec %% 3600) %/% 60
+  secs <- sec %% 60
+  sprintf("%02d:%02d:%02d", hrs, mins, secs)
+}
+
+# ---------------------------
+# UI
+# ---------------------------
+ui <- fluidPage(
+  useShinyjs(),
+  titlePanel("Shared Sequential Timers - Server Driven"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      textInput("sample_id", "Enter Sample ID:"),
+      selectInput("instrument", "Select Instrument:",
+                  choices = c("DxU", "iQ200", "Mission 120")),
+      selectInput("mode", "Select Test:",
+                  choices = c("Room Temperature", "Refrigerated")),
+      actionButton("start_btn", "Start Timers")
+    ),
+    mainPanel(
+      DTOutput("timers_dt")
+    )
+  ),
+  
+  tags$style(HTML("
+    .active-row { background-color: #d4edda !important; }
+    .completed-row { background-color: #f8f9fa !important; }
+    .pending-row { background-color: #fff3cd !important; }
+    .btn-delete { color: white; background-color: #dc3545; border: none; padding:4px 8px; cursor:pointer; }
+  "))
+)
+
+# ---------------------------
+# Server
+# ---------------------------
 server <- function(input, output, session) {
   
   durations_list <- list(
@@ -134,7 +210,7 @@ server <- function(input, output, session) {
   # ---------------------------
   output$timers_dt <- renderDT({
     df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
-    if (nrow(df) == 0) return(datatable(data.frame(Message="No timers"), escape=FALSE))
+    if(nrow(df)==0) return(datatable(data.frame(Message="No timers")))
     
     df2 <- df %>%
       mutate(
@@ -142,7 +218,7 @@ server <- function(input, output, session) {
         Remaining = format_hms(remaining_secs),
         Delete = paste0('<button id="del_', id, '" class="btn-delete">Delete</button>')
       ) %>%
-      select(id, sample_id, instrument, mode, Step, Remaining, status, Delete)
+      select(sample_id, instrument, mode, Step, Remaining, status, Delete)
     
     datatable(df2,
               escape = FALSE,
@@ -152,64 +228,57 @@ server <- function(input, output, session) {
                 paging = TRUE,
                 searching = TRUE,
                 ordering = TRUE,
-                columnDefs = list(list(targets=7, orderable=FALSE))
-              ),
-              callback = JS("
-                table.rows().every(function(rowIdx, tableLoop, rowLoop){
-                  this.node().id = this.data()[0]; // assign row id from first column
-                });
-              ")
-    )
-  }, server = FALSE)
+                columnDefs = list(list(targets=6, orderable=FALSE))
+              ))
+  }, server = TRUE)
+  
+  # Proxy for live updates
+  proxy <- dataTableProxy("timers_dt")
   
   # ---------------------------
-  # Timer update (without table reload)
+  # Live countdown
   # ---------------------------
   autoInvalidate <- reactiveTimer(1000, session)
+  
   observe({
     autoInvalidate()
+    
     now <- Sys.time()
+    active <- dbGetQuery(pool_db, "SELECT id, start_time, total_secs FROM timers WHERE status = 'Active'")
     
-    active <- dbGetQuery(pool_db, "
-      SELECT id, start_time, total_secs
-      FROM timers
-      WHERE status = 'Active'
-    ")
-    
-    if (nrow(active) > 0) {
-      for (i in seq_len(nrow(active))) {
+    if(nrow(active) > 0){
+      for(i in seq_len(nrow(active))){
         id_i <- active$id[i]
         start_i <- as.POSIXct(active$start_time[i], tz = "")
         total_i <- active$total_secs[i]
-        elapsed <- as.numeric(difftime(now, start_i, units = "secs"))
-        remaining <- max(0, total_i - floor(elapsed))
+        remaining <- max(0, total_i - as.numeric(difftime(now, start_i, units = "secs")))
         status <- ifelse(remaining <= 0, "Completed", "Active")
         end_time <- ifelse(remaining <= 0, now, NA)
         
-        dbExecute(pool_db, "
-          UPDATE timers
-          SET remaining_secs = ?, status = ?, end_time = COALESCE(end_time, ?)
-          WHERE id = ?",
+        dbExecute(pool_db,
+                  "UPDATE timers SET remaining_secs = ?, status = ?, end_time = COALESCE(end_time, ?) WHERE id = ?",
                   params = list(remaining, status, end_time, id_i))
       }
     }
     
-    # Send updated times to JS
+    # Pull updated table
     df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
     if(nrow(df) > 0){
-      timerData <- df %>%
-        mutate(Remaining = format_hms(remaining_secs)) %>%
-        select(id, Remaining, status) %>%
-        split(seq(nrow(df)))
+      df2 <- df %>%
+        mutate(
+          Step = sprintf("%.1fh", total_secs/3600) %>% sub("\\.0h$", "h", .),
+          Remaining = format_hms(remaining_secs),
+          Delete = paste0('<button id="del_', id, '" class="btn-delete">Delete</button>')
+        ) %>%
+        select(sample_id, instrument, mode, Step, Remaining, status, Delete)
       
-      session$sendCustomMessage('updateTimers', timerData)
+      replaceData(proxy, df2, resetPaging = FALSE)
     }
   })
   
   # ---------------------------
   # Delete buttons
   # ---------------------------
-  proxy <- dataTableProxy("timers_dt")
   observe({
     session$onFlushed(function() {
       runjs("
@@ -249,3 +318,10 @@ server <- function(input, output, session) {
 # Run app
 # ---------------------------
 shinyApp(ui, server)
+
+
+# ---------------------------
+# Run app
+# ---------------------------
+shinyApp(ui, server)
+
