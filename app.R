@@ -260,20 +260,24 @@ server <- function(input, output, session) {
                   params = list(remaining, status, end_time, id_i))
       }
     }
-    
-    # Pull updated table
-    df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
-    if(nrow(df) > 0){
-      df2 <- df %>%
-        mutate(
-          Step = sprintf("%.1fh", total_secs/3600) %>% sub("\\.0h$", "h", .),
-          Remaining = format_hms(remaining_secs),
-          Delete = paste0('<button id="del_', id, '" class="btn-delete">Delete</button>')
-        ) %>%
-        select(sample_id, instrument, mode, Step, Remaining, status, Delete)
-      
-      replaceData(proxy, df2, resetPaging = FALSE)
-    }
+# Pull updated table
+df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
+if(nrow(df) > 0){
+  df2 <- df %>%
+    mutate(
+      Step = sprintf("%.1fh", total_secs/3600) %>% sub("\\.0h$", "h", .),
+      Remaining = format_hms(remaining_secs),
+      Delete = paste0('<button id="del_', id, '" class="btn-delete">Delete</button>'),
+      sample_id = as.character(sample_id),
+      instrument = as.character(instrument),
+      mode = as.character(mode),
+      status = as.character(status)
+    ) %>%
+    select(sample_id, instrument, mode, Step, Remaining, status, Delete)
+  
+  replaceData(proxy, df2, resetPaging = FALSE)
+}
+
   })
   
   # ---------------------------
@@ -324,4 +328,5 @@ shinyApp(ui, server)
 # Run app
 # ---------------------------
 shinyApp(ui, server)
+
 
