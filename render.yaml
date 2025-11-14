@@ -1,0 +1,14 @@
+# render.yaml
+services:
+  - type: shiny
+    name: shared-timers-app
+    env: r
+    plan: free
+    buildCommand: Rscript install.R
+    startCommand: R -e "shiny::runApp('.', port=10000, host='0.0.0.0')"
+    envVars:
+      R_SHINY_PORT: 10000
+    mounts:
+      - type: volume
+        source: shiny-data
+        target: /data
