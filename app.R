@@ -145,6 +145,8 @@ server <- function(input, output, session) {
   
   # Render DT
   output$timers_dt <- renderDT({
+    autoInvalidate()  # <- ensures table refreshes every second
+    
     df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
     if (nrow(df) == 0) return(datatable(data.frame(Message="No timers"), escape=FALSE))
     
