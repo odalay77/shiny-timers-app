@@ -88,6 +88,9 @@ server <- function(input, output, session) {
     "Refrigerated"     = c(8*3600, 24*3600, 48*3600, 52*3600)
   )
   
+  # Timer cache to track last remaining seconds
+  timer_cache <- reactiveVal(data.frame(id=integer(), remaining_secs=integer()))
+  
   # Start timers
   observeEvent(input$start_btn, {
     req(input$sample_id, input$instrument)
@@ -111,19 +114,22 @@ server <- function(input, output, session) {
     showNotification(paste("Timers started for sample", input$sample_id), type = "message")
   })
   
-  # Update remaining time every second (server-side)
+  # Reactive DT proxy
+  proxy <- dataTableProxy("timers_dt")
+  
+  # Update remaining time every second (server-side, smooth)
   autoInvalidate <- reactiveTimer(1000, session)
   observe({
     autoInvalidate()
     now <- Sys.time()
     
-    active <- dbGetQuery(pool_db, "
-      SELECT id, start_time, total_secs
-      FROM timers
-      WHERE status = 'Active'
-    ")
+    # Get active timers
+    active <- dbGetQuery(pool_db, "SELECT id, start_time, total_secs, remaining_secs FROM timers WHERE status = 'Active'")
     
     if (nrow(active) > 0) {
+      df_cache <- timer_cache()
+      updated_ids <- integer(0)
+      
       for (i in seq_len(nrow(active))) {
         id_i <- active$id[i]
         start_i <- as.POSIXct(active$start_time[i], tz = "")
@@ -131,22 +137,43 @@ server <- function(input, output, session) {
         elapsed <- as.numeric(difftime(now, start_i, units = "secs"))
         remaining <- max(0, total_i - floor(elapsed))
         
-        status <- ifelse(remaining <= 0, "Completed", "Active")
-        end_time <- ifelse(remaining <= 0, now, NA)
+        # Only update if remaining time changed
+        old_remaining <- df_cache$remaining_secs[df_cache$id == id_i]
+        if (length(old_remaining) == 0 || old_remaining != remaining) {
+          status <- ifelse(remaining <= 0, "Completed", "Active")
+          end_time <- ifelse(remaining <= 0, now, NA)
+          
+          dbExecute(pool_db, "
+            UPDATE timers
+            SET remaining_secs = ?, status = ?, end_time = COALESCE(end_time, ?)
+            WHERE id = ?",
+                    params = list(remaining, status, end_time, id_i))
+          
+          updated_ids <- c(updated_ids, id_i)
+        }
+      }
+      
+      # Update the cache
+      timer_cache(active[, c("id", "remaining_secs")])
+      
+      # Update only changed rows in DT
+      if (length(updated_ids) > 0) {
+        df_all <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
+        df2 <- df_all %>%
+          mutate(
+            Step = sprintf("%.1fh", total_secs/3600) %>% sub("\\.0h$", "h", .),
+            Remaining = format_hms(remaining_secs),
+            Delete = paste0('<button id="del_', id, '" class="btn-delete">Delete</button>')
+          ) %>%
+          select(sample_id, instrument, mode, Step, Remaining, status, Delete)
         
-        dbExecute(pool_db, "
-          UPDATE timers
-          SET remaining_secs = ?, status = ?, end_time = COALESCE(end_time, ?)
-          WHERE id = ?",
-                  params = list(remaining, status, end_time, id_i))
+        replaceData(proxy, df2, resetPaging = FALSE, rownames = FALSE)
       }
     }
   })
   
   # Render DT
   output$timers_dt <- renderDT({
-    autoInvalidate()  # <- ensures table refreshes every second
-    
     df <- dbGetQuery(pool_db, "SELECT * FROM timers ORDER BY created_at DESC")
     if (nrow(df) == 0) return(datatable(data.frame(Message="No timers"), escape=FALSE))
     
@@ -180,7 +207,6 @@ server <- function(input, output, session) {
   }, server = FALSE)
   
   # JS Delete button hookup
-  proxy <- dataTableProxy("timers_dt")
   observe({
     session$onFlushed(function() {
       runjs("
@@ -217,8 +243,10 @@ server <- function(input, output, session) {
   })
 }
 
+
 # ---------------------------
 # Run app
 # ---------------------------
 shinyApp(ui, server)
+
 
