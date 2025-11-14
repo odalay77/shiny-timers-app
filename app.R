@@ -53,7 +53,7 @@ format_hms <- function(sec) {
 # ---------------------------
 ui <- fluidPage(
   useShinyjs(),
-  titlePanel("Shared Sequential Timers - Server Driven"),
+  titlePanel("Urine Stability Timers"),
   
   sidebarLayout(
     sidebarPanel(
@@ -221,3 +221,4 @@ server <- function(input, output, session) {
 # Run app
 # ---------------------------
 shinyApp(ui, server)
+
