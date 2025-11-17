@@ -13,8 +13,8 @@ COPY . /srv/shiny-server/
 COPY install.R /tmp/install.R
 RUN Rscript /tmp/install.R
 
-# Expose port 3838 (default shiny port)
+# Expose dynamic port (Render will set PORT)
 EXPOSE 3838
 
-# Run the shiny app
-CMD ["R", "-e", "shiny::runApp('/srv/shiny-server', port=3838, host='0.0.0.0')"]
+# Run the shiny app (use Render’s PORT variable)
+CMD ["R", "-e", "port <- as.numeric(Sys.getenv('PORT', '3838')); shiny::runApp('/srv/shiny-server', host='0.0.0.0', port=port)"]
